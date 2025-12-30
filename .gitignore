@@ -37,6 +37,7 @@ env/
 # Project Data
 data/raw/
 data/vectordb/
+scripts/
 # Qdrant local storage if mapped
 qdrant_storage/
 
