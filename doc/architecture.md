@@ -53,8 +53,8 @@ C4Component
     Component(scraper, "Scraper Service", "BeautifulSoup", "Scrapes AWS docs and saves as Markdown")
     Component(chunker, "Chunking Logic", "Python (Regex)", "Splits Markdown hierarchically by headers")
     Component(vector_service, "Vector DB Service", "Qdrant Client", "Manages indices and performs searches")
-    Component(rag_service, "RAG Service", "Python", "Retrieves context and prompts LLM")
-    Component(agent_core, "Agent Core", "Strands", "Orchestrates tools and conversation flow")
+    Component(rag_service, "RAG Service", "Strands Agent", "Retrieves context and answers questions")
+    Component(agent_core, "Agent Core", "Strands Agent", "Orchestrates tools and conversation flow")
     Component(gemini_adapter, "Gemini Model Adapter", "Strands Model", "Connects Strands to Gemini API")
     Component(observability, "Observability", "Langfuse Decorators", "Traces execution flow")
 

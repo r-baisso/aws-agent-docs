@@ -14,6 +14,9 @@
 - **RAG UX**: Chat history is automatically cleared when switching the selected service context.
 - **Agent Logic**: Updated agent system prompt to enforce a "Loop" workflow (Explore -> Search -> Synthesize).
 - **API Models**: Updated `ScrapeRequest` to include `max_jobs` parameter.
+- **RAG Architecture**: Refactored `api/services/rag.py` to use `strands` Agent instead of raw Gemini client.
+    - Enables consistent observability via `strands` and Langfuse.
+    - Updated to inject context into User Prompt instead of System Prompt to support a wider range of models (e.g., Gemma).
 
 ## [0.3.0] - 2025-12-26
 

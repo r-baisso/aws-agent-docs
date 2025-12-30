@@ -1,15 +1,28 @@
-from google import genai
+from strands import Agent
+from strands.models.gemini import GeminiModel
 from api.core.config import settings
-
-# Initialize client
-google_client = None
-if settings.GOOGLE_API_KEY:
-    google_client = genai.Client(api_key=settings.GOOGLE_API_KEY)
-
-from api.services.vector_db import search_service_index, list_service_headers
+from api.services.vector_db import search_service_index
 import logging
+import json
 
 logger = logging.getLogger(__name__)
+
+# Initialize RAG Model
+gemini_rag_model = None
+if settings.GOOGLE_API_KEY:
+    try:
+        gemini_rag_model = GeminiModel(
+            client_args={
+                "api_key": settings.GOOGLE_API_KEY,
+            },
+            model_id=settings.GEMINI_RAG_MODEL_ID,
+            params={
+                "temperature": 0.3, # Slightly creative but grounded
+                "max_output_tokens": 8192,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize GeminiModel for RAG: {e}")
 
 def retrieve_service_docs(service_name: str, query: str, path_filters: list[str] = None):
     """
@@ -17,19 +30,24 @@ def retrieve_service_docs(service_name: str, query: str, path_filters: list[str]
     """
     logger.debug(f"Retrieving docs for {service_name} with query: '{query}'")
     docs = search_service_index(service_name, query, k=5, path_filters=path_filters)
-    logger.debug(f"Retrieved {len(docs)} documents.")
-    return docs
+    # Deduplicate based on content to avoid repetitive context
+    seen = set()
+    unique_docs = []
+    for doc in docs:
+        if doc['content'] not in seen:
+            unique_docs.append(doc)
+            seen.add(doc['content'])
+            
+    logger.debug(f"Retrieved {len(unique_docs)} unique documents.")
+    return unique_docs
 
 from langfuse import observe
 
-# We might not need answer_question here anymore if the Agent handles it.
-# But keeping a simple RAG function for the /ask endpoint is good.
-
-def _construct_rag_prompt(service_name: str, docs: list[dict], question: str, history: list[dict] = None) -> str:
-    """Helper to construct the RAG prompt."""
+def _prepare_rag_context(service_name: str, docs: list[dict], history: list[dict] = None) -> str:
+    """Helper to construct the RAG context string."""
     context_str = ""
     for i, doc in enumerate(docs):
-        context_str += f"Source {i+1} ({doc['url']} - {doc['context']}):\n{doc['content']}\n\n"
+        context_str += f"Source {i+1} ({doc['url']}):\n{doc['content']}\n\n"
         
     history_str = ""
     if history:
@@ -40,120 +58,93 @@ def _construct_rag_prompt(service_name: str, docs: list[dict], question: str, hi
             history_str += f"{role}: {content}\n"
         history_str += "\n"
 
-    prompt = f"""You are a helpful assistant for AWS {service_name} documentation. Use the following context to answer the user's question.
-If the answer is not in the context, say you don't know.
-Always cite the source URL when providing information.
+    system_prompt = f"""You are a helpful assistant for AWS {service_name} documentation.
+Your goal is to answer the user's question mostly based on the provided Context.
+
+Instructions:
+1. Use the Context below to answer the user's question.
+2. If the answer is not in the Context, say "I couldn't find relevant information in the knowledge base." but you can try to answer from your general knowledge if clearly stated.
+3. Always cite the Source URLs provided in the Context when using that information.
+4. Be concise and professional.
 
 Context:
 {context_str}
 
 {history_str}
-Question: {question}
+"""
+    return system_prompt
 
-Answer:"""
-    logger.debug(f"Constructed prompt with {len(prompt)} characters.")
-    return prompt
+def _create_rag_agent() -> Agent:
+    """Helper to create a configured Strands Agent for RAG (without system prompt)."""
+    if not gemini_rag_model:
+        raise ValueError("Gemini RAG Model not initialized.")
+        
+    # Initialize agent with NO tools and NO system prompt (to avoid model incompatibility)
+    agent = Agent(
+        model=gemini_rag_model,
+        tools=[], 
+        system_prompt=None
+    )
+    return agent
 
-@observe()
+@observe(as_type="agent")
 def answer_question(service_name: str, question: str, history: list[dict] = None):
     """
-    Generates an answer using RAG for a specific service.
+    Generates an answer using RAG via Strands Agent.
     """
-    # 1. Retrieve relevant documents
-    # Note: We use the raw question for search context. 
-    # In a more advanced setup, we'd rewrite the query based on history.
-    docs = retrieve_service_docs(service_name, question)
-    
-    if not docs:
-        return f"I couldn't find any relevant information in the {service_name} knowledge base."
-    
-    # 2. Construct prompt
-    prompt = _construct_rag_prompt(service_name, docs, question, history)
-
-    # 3. Generate answer using Gemini
     try:
-        if not google_client:
-             return "Error: Google API Key not configured."
-             
-        response = google_client.models.generate_content(
-            model=settings.GEMINI_RAG_MODEL_ID,
-            contents=prompt
-        )
-        return response.text
+        # 1. Retrieve
+        docs = retrieve_service_docs(service_name, question)
+        if not docs:
+            return f"I couldn't find any relevant information in the {service_name} knowledge base."
+            
+        # 2. Create Agent and Context
+        context_instruction = _prepare_rag_context(service_name, docs, history)
+        agent = _create_rag_agent()
+        
+        # 3. Run Agent
+        # Prepend context to the question since we can't use system_prompt with some models
+        full_prompt = f"{context_instruction}\n\nUser Question: {question}"
+        
+        response = agent(full_prompt)
+        return response.get("response", {}).get("text", "No response generated.")
+        
     except Exception as e:
+        logger.error(f"RAG Error: {e}")
         return f"Error generating answer: {e}"
 
-async def generate_standalone_query(question: str, history: list[dict]) -> str:
-    """
-    Rewrites the question to be standalone based on history.
-    """
-    if not history:
-        return question
+# We skip standalone query rewrite for now to keep it simple with Strands,
+# or we could reimplement it using a simple strands agent too if needed.
+# For now, simplistic history injection is often sufficient.
 
-    history_str = ""
-    for msg in history[-3:]: # Only use recent history
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        history_str += f"{role}: {content}\n"
-
-    prompt = f"""Given the following conversation and a follow-up question, rephrase the follow-up question to be a standalone question.
-Chat History:
-{history_str}
-Follow Up Input: {question}
-Standalone Question:"""
-
-    try:
-        if not google_client:
-            return question
-            
-        # Use async client if possible, or sync for simplicity since this is short
-        response = await google_client.aio.models.generate_content(
-            model=settings.GEMINI_RAG_MODEL_ID,
-            contents=prompt
-        )
-        return response.text.strip()
-    except Exception as e:
-        print(f"Error rewriting query: {e}")
-        return question
-
-@observe()
+@observe(as_type="agent")
 async def answer_question_stream(service_name: str, question: str, history: list[dict] = None):
     """
-    Generates a streaming answer using RAG.
+    Generates a streaming answer using RAG via Strands Agent.
     """
-    # 0. Contextualize Query
-    search_query = question
-    if history:
-         search_query = await generate_standalone_query(question, history)
-         # Yielding a debug message or metadata could be useful, but let's keep it clean for now.
-         # print(f"Rewritten Query: {search_query}")
-
-    # 1. Retrieve relevant documents using the rewritten query
-    docs = retrieve_service_docs(service_name, search_query)
-    
-    if not docs:
-        yield f"I couldn't find any relevant information in the {service_name} knowledge base."
-        return
-
-    # 2. Construct prompt
-    # We still use the original question and history for the generation prompt
-    # so the model maintains the conversational tone, but the Context is now better.
-    prompt = _construct_rag_prompt(service_name, docs, question, history)
-
-    # 3. Generate stream
     try:
-        if not google_client:
-             yield "Error: Google API Key not configured."
+        # 1. Retrieve
+        docs = retrieve_service_docs(service_name, question)
+        if not docs:
+             yield f"I couldn't find any relevant information in the {service_name} knowledge base."
              return
 
-        # Use async client for streaming
-        async_client = google_client.aio
-        async for chunk in await async_client.models.generate_content_stream(
-            model=settings.GEMINI_RAG_MODEL_ID,
-            contents=prompt
-        ):
-             if chunk.text:
-                 yield chunk.text
-
+        # 2. Create Agent and Context
+        context_instruction = _prepare_rag_context(service_name, docs, history)
+        agent = _create_rag_agent()
+        
+        # 3. Stream Agent
+        full_prompt = f"{context_instruction}\n\nUser Question: {question}"
+        
+        async for chunk in agent.stream_async(full_prompt):
+            # Parse Strands chunk for content
+             if "event" in chunk:
+                 event_data = chunk["event"]
+                 if "contentBlockDelta" in event_data:
+                     delta = event_data["contentBlockDelta"].get("delta", {})
+                     if "text" in delta:
+                         yield delta["text"]
+                         
     except Exception as e:
+        logger.error(f"RAG Stream Error: {e}")
         yield f"Error generating answer: {e}"
