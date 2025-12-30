@@ -39,9 +39,7 @@ C4Container
     Rel(api, fs, "Reads/Writes raw docs")
     Rel(api, qdrant, "Reads/Writes vectors", "gRPC/HTTP")
     Rel(api, gemini_api, "Inference", "HTTPS")
-    Rel(api, gemini_api, "Inference", "HTTPS")
     Rel(api, langfuse_api, "Trace Data", "HTTPS")
-    Rel(api, aws_docs, "Discovers Services & Scrapes", "HTTPS")
 ```
 
 ## C3: Component Diagram (API Service)
@@ -52,8 +50,7 @@ C4Component
 
     Container(api, "API Service", "Python Application")
 
-    Component(scraper, "Scraper Service", "BeautifulSoup & ThreadPool", "Scrapes AWS docs and saves as Markdown")
-    Component(metadata, "Metadata Service", "Sitemap Parser", "Discovers available AWS services dynamically")
+    Component(scraper, "Scraper Service", "BeautifulSoup", "Scrapes AWS docs and saves as Markdown")
     Component(chunker, "Chunking Logic", "Python (Regex)", "Splits Markdown hierarchically by headers")
     Component(vector_service, "Vector DB Service", "Qdrant Client", "Manages indices and performs searches")
     Component(rag_service, "RAG Service", "Python", "Retrieves context and prompts LLM")
@@ -62,7 +59,6 @@ C4Component
     Component(observability, "Observability", "Langfuse Decorators", "Traces execution flow")
 
     Rel(scraper, chunker, "Passes raw text")
-    Rel(api, metadata, "Gets Service List")
     Rel(chunker, vector_service, "Passes chunks")
     Rel(agent_core, vector_service, "Calls tools (list, explore, search)")
     Rel(agent_core, rag_service, "Delegates QA")
