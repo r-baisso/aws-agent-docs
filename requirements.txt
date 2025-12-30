@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+beautifulsoup4
+requests
+faiss-cpu
+strands-agents[gemini]
+qdrant-client
+langfuse
+strands-agents-tools
+strands-agents[otel]
+google-genai
+python-dotenv
+markdownify
+streamlit
