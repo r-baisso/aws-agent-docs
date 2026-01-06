@@ -169,11 +169,22 @@ def build_service_index(service_name: str):
         vectors_config=VectorParams(size=dimension, distance=Distance.COSINE),
     )
 
-    # Upload points (batch upload is handled by client, but we can just pass the list)
-    client.upsert(
-        collection_name=collection_name,
-        points=points
-    )
+    # Upload points in batches to avoid payload size limits (e.g., 32MB limit)
+    batch_size = 100
+    total_points = len(points)
+    
+    for i in range(0, total_points, batch_size):
+        batch = points[i : i + batch_size]
+        logger.info(f"Upserting batch {i//batch_size + 1}/{(total_points + batch_size - 1)//batch_size} ({len(batch)} points)...")
+        try:
+            client.upsert(
+                collection_name=collection_name,
+                points=batch
+            )
+        except Exception as e:
+            logger.error(f"Failed to upsert batch starting at {i}: {e}")
+            # Optionally retry or re-raise? For now, we log and continue/raise
+            raise e
     
     return {"status": "success", "documents_indexed": len(points)}
 

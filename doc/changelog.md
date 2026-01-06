@@ -17,6 +17,10 @@
 - **RAG Architecture**: Refactored `api/services/rag.py` to use `strands` Agent instead of raw Gemini client.
     - Enables consistent observability via `strands` and Langfuse.
     - Updated to inject context into User Prompt instead of System Prompt to support a wider range of models (e.g., Gemma).
+- **Scraper Strategy**: Replaced TOC-based scraping with Sitemap-based scraping (`sitemap_index.xml` -> Service Sitemap XML) for 100% reliable page discovery.
+
+### Fixed
+- **Qdrant Indexing**: Implemented batched upserts (batch size=100) in `vector_db.py` to prevent payload size errors on large document sets.
 
 ## [0.3.0] - 2025-12-26
 

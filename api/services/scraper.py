@@ -10,27 +10,11 @@ import json
 import time
 from markdownify import markdownify as md
 from api.core.config import settings
-from api.services.aws_metadata import validate_service, get_service_toc_url
+from api.services.aws_metadata import get_service_sitemap_url
 import logging
 
 logger = logging.getLogger(__name__)
 
-def get_toc_urls(toc_json, base_url):
-    """Recursively extract URLs from the TOC JSON."""
-    urls = []
-    if isinstance(toc_json, dict):
-        if "href" in toc_json and toc_json["href"] and not toc_json["href"].startswith("#"):
-             # Handle relative URLs. Some might be relative to the TOC location.
-             # Usually they are just filenames like "Welcome.html"
-             urls.append(base_url + toc_json["href"])
-        
-        if "contents" in toc_json:
-            for item in toc_json["contents"]:
-                urls.extend(get_toc_urls(item, base_url))
-    elif isinstance(toc_json, list):
-        for item in toc_json:
-            urls.extend(get_toc_urls(item, base_url))
-    return urls
 
 def scrape_page(url):
     """Scrape a single page and return the Markdown content."""
@@ -56,7 +40,25 @@ def scrape_page(url):
 from concurrent.futures import ThreadPoolExecutor
 
 import json
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from api.services.aws_metadata import get_service_sitemap_url
+
+def get_sitemap_urls(sitemap_content):
+    """Extract page URLs from a sitemap XML."""
+    urls = []
+    try:
+        root = ET.fromstring(sitemap_content)
+        # Sitemaps use a namespace usually
+        namespace = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+        
+        for url in root.findall('ns:url', namespace):
+            loc = url.find('ns:loc', namespace)
+            if loc is not None and loc.text:
+                urls.append(loc.text)
+    except Exception as e:
+        logger.error(f"Error parsing sitemap XML: {e}")
+    return urls
 
 def scrape_aws_docs(service_list: list[str], limit: int = None, max_jobs: int = 4):
     # Yields JSON strings for progress updates
@@ -66,101 +68,101 @@ def scrape_aws_docs(service_list: list[str], limit: int = None, max_jobs: int = 
     if max_jobs > 20: max_jobs = 20
 
     for service in service_list:
-        yield json.dumps({"type": "log", "message": f"Validating service: {service}..."})
+        yield json.dumps({"type": "log", "message": f"Locating sitemap for: {service}..."})
         
-        valid, toc_url = validate_service(service)
-        if not valid:
-            logger.warning(f"Service {service} validation failed.")
-            yield json.dumps({"type": "error", "service": service, "message": "Validation failed or not found."})
+        # 1. Get Sitemap URL from Metadata
+        sitemap_url = get_service_sitemap_url(service)
+        
+        if not sitemap_url:
+            logger.warning(f"Sitemap for {service} not found in index.")
+            yield json.dumps({"type": "error", "service": service, "message": "Sitemap not found in AWS index."})
             continue
 
-        base_url = toc_url.replace("toc-contents.json", "")
-        
-        logger.info(f"Fetching TOC from {toc_url}...")
-        yield json.dumps({"type": "log", "message": f"Fetching TOC for {service}..."})
+        yield json.dumps({"type": "log", "message": f"Found sitemap: {sitemap_url}"})
+        logger.info(f"Fetching Sitemap from {sitemap_url}...")
         
         try:
-            response = requests.get(toc_url, timeout=10)
+            # 2. Fetch Sitemap XML
+            response = requests.get(sitemap_url, timeout=10)
             if response.status_code != 200:
-                toc_url = toc_url.replace("userguide", "developerguide")
-                base_url = toc_url.replace("toc-contents.json", "")
-                logger.info(f"Retrying with Developer Guide: {toc_url}...")
-                yield json.dumps({"type": "log", "message": "Retrying with Developer Guide..."})
-                response = requests.get(toc_url, timeout=10)
-
-            if response.status_code == 200:
-                toc_data = response.json()
-                page_urls = get_toc_urls(toc_data, base_url)
-                page_urls = list(dict.fromkeys(page_urls))
+                logger.error(f"Failed to fetch sitemap: {response.status_code}")
+                yield json.dumps({"type": "error", "service": service, "message": f"Failed to fetch sitemap (HTTP {response.status_code})."})
+                continue
                 
+            # 3. Parse URLs
+            page_urls = get_sitemap_urls(response.content)
+            
+            # Deduplicate and sort
+            page_urls = sorted(list(dict.fromkeys(page_urls)))
+            
+            total_pages = len(page_urls)
+            logger.info(f"Found {total_pages} pages for {service}.")
+            yield json.dumps({"type": "log", "message": f"Found {total_pages} pages."})
+            
+            if limit:
+                # If limiting, maybe user guides have an order? Sitemap is usually arbitrary.
+                # Sorting by URL might help keep it consistent.
+                page_urls = page_urls[:limit]
                 total_pages = len(page_urls)
-                logger.info(f"Found {total_pages} pages for {service}.")
-                yield json.dumps({"type": "log", "message": f"Found {total_pages} pages."})
+                logger.info(f"Limiting to first {limit} pages.")
+                yield json.dumps({"type": "log", "message": f"Limiting to {limit} pages."})
+            
+            full_content_blocks = [None] * total_pages
+            
+            # Report Initial Progress
+            yield json.dumps({
+                "type": "progress", 
+                "service": service, 
+                "current": 0, 
+                "total": total_pages, 
+                "message": "Starting scrape..."
+            })
+            
+            completed_count = 0
+            
+            # 4. Scrape Pages
+            with ThreadPoolExecutor(max_workers=max_jobs) as executor:
+                future_to_index = {executor.submit(scrape_page, url): i for i, url in enumerate(page_urls)}
                 
-                if limit:
-                    page_urls = page_urls[:limit]
-                    total_pages = len(page_urls)
-                    logger.info(f"Limiting to first {limit} pages.")
-                    yield json.dumps({"type": "log", "message": f"Limiting to {limit} pages."})
-                
-                full_content_blocks = [None] * total_pages
-                
-                # Report Initial Progress
-                yield json.dumps({
-                    "type": "progress", 
-                    "service": service, 
-                    "current": 0, 
-                    "total": total_pages, 
-                    "message": "Starting scrape..."
-                })
-                
-                completed_count = 0
-                
-                with ThreadPoolExecutor(max_workers=max_jobs) as executor:
-                    future_to_index = {executor.submit(scrape_page, url): i for i, url in enumerate(page_urls)}
-                    
-                    for future in as_completed(future_to_index):
-                        i = future_to_index[future]
-                        url = page_urls[i]
-                        try:
-                            content = future.result()
-                            if content:
-                                block = f"--- START PAGE: {url} ---\n{content}\n--- END PAGE: {url} ---\n\n"
-                                full_content_blocks[i] = block
-                            
+                for future in as_completed(future_to_index):
+                    i = future_to_index[future]
+                    url = page_urls[i]
+                    try:
+                        content = future.result()
+                        if content:
+                            block = f"--- START PAGE: {url} ---\n{content}\n--- END PAGE: {url} ---\n\n"
+                            full_content_blocks[i] = block
+                        
+                        completed_count += 1
+                        # Yield Progress
+                        yield json.dumps({
+                            "type": "progress", 
+                            "service": service, 
+                            "current": completed_count, 
+                            "total": total_pages,
+                            "message": f"Scraped {url}"
+                        })
+                        
+                    except Exception as e:
+                            logger.error(f"Error scraping {url}: {e}")
                             completed_count += 1
-                            # Yield Progress
-                            yield json.dumps({
-                                "type": "progress", 
-                                "service": service, 
-                                "current": completed_count, 
-                                "total": total_pages,
-                                "message": f"Scraped {url}"
-                            })
-                            
-                        except Exception as e:
-                             logger.error(f"Error scraping {url}: {e}")
-                             # Still increment completed count effectively?
-                             completed_count += 1
+            
+            final_content = [b for b in full_content_blocks if b]
+            
+            filename = f"{service}.md"
+            filepath = os.path.join(settings.RAW_DATA_DIR, filename)
+            
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write("".join(final_content))
+            
+            yield json.dumps({
+                "type": "result", 
+                "service": service, 
+                "status": "success", 
+                "pages_scraped": len(final_content), 
+                "path": filepath
+            })
                 
-                final_content = [b for b in full_content_blocks if b]
-                
-                filename = f"{service}.md"
-                filepath = os.path.join(settings.RAW_DATA_DIR, filename)
-                
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write("".join(final_content))
-                
-                yield json.dumps({
-                    "type": "result", 
-                    "service": service, 
-                    "status": "success", 
-                    "pages_scraped": len(final_content), 
-                    "path": filepath
-                })
-                
-            else:
-                 yield json.dumps({"type": "error", "service": service, "message": f"Top of Content not found (404)."})
-                 
         except Exception as e:
+            logger.error(f"Scrape error: {e}")
             yield json.dumps({"type": "error", "service": service, "message": str(e)})
